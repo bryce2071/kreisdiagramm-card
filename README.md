@@ -48,6 +48,13 @@ entities:
 | `unit` | optional, Einheit – sonst die der Entitäten |
 | `datum_wahl` | optional, `false` blendet Pfeile und Kalender aus |
 
+## Bearbeiten-Dialog
+
+Alles lässt sich auch im Bearbeiten-Dialog einstellen: oben Überschrift, Wert in der Mitte, Text unter dem
+Wert, Einheit, Nachkommastellen und „Frühere Tage wählbar“; darunter die Teile – je Teil Entität, Name
+und Farbe (Farbwähler). Mit den Pfeilen umsortieren, mit dem Papierkorb entfernen; über „Teil
+hinzufügen“ eine weitere Entität anhängen. Ohne eigene Farbe gilt die Farbe nach der Reihenfolge.
+
 ## Bedienung
 
 - Tipp auf ein Stück oder eine Zeile der Legende öffnet den Verlauf der Entität, Tipp auf die Mitte den der
@@ -61,7 +68,6 @@ entities:
 
 - Wer die Datei vorher von Hand eingebunden hatte (`/local/kreisdiagramm-card.js`), entfernt diese
   Ressource (**Einstellungen → Dashboards → ⋮ → Ressourcen**), sonst lädt der Browser die ältere Fassung.
-- Einstellungen bisher nur im Code-Editor (YAML).
 
 ## Lizenz
 

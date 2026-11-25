@@ -1,9 +1,10 @@
 /*
- * Kreisdiagramm-Karte für Home Assistant  –  v1.1.0
+ * Kreisdiagramm-Karte für Home Assistant  –  v1.2.0
  * Zeigt mehrere Werte als Anteile eines Ganzen (Donut), die Summe steht in der Mitte.
  * Mit den Pfeilen oder dem Kalender oben rechts lassen sich frühere Tage ansehen: heute zeigt die
  * Karte die aktuellen Werte der Entitäten, frühere Tage kommen aus deren Langzeitstatistik
  * (Änderung über den Tag). Ein Tipp auf eine Zeile der Legende öffnet den Verlauf der Entität.
+ * Alle Einstellungen gehen auch im Bearbeiten-Dialog der Karte (seit 1.2.0).
  *
  * type: custom:kreisdiagramm-card
  * title: Hausverbrauch                        # optional, Überschrift
@@ -21,7 +22,8 @@
  */
 (() => {
   const TAG = "kreisdiagramm-card";
-  const VERSION = "1.1.0";
+  const EDITOR_TAG = `${TAG}-editor`;
+  const VERSION = "1.2.0";
   if (customElements.get(TAG)) return;
 
   const PALETTE = ["#488fc2", "#ff9800", "#4db6ac", "#8353d1", "#f06292", "#9ccc65", "#ffca28", "#78909c"];
@@ -195,6 +197,10 @@
 
     getGridOptions() {
       return { columns: 12, min_columns: 6 };
+    }
+
+    static getConfigElement() {
+      return document.createElement(EDITOR_TAG);
     }
 
     static getStubConfig(hass) {
@@ -635,6 +641,314 @@
     }
   }
 
+  // ---------- Bearbeiten-Dialog ----------
+
+  // HA lädt seine Formular-Bausteine (ha-form, Auswahlfelder) erst mit einem Editor –
+  // notfalls einmal den Editor der Entitäten-Karte laden, dann sind sie da.
+  let formVersprechen = null;
+  const haFormLaden = () => {
+    if (!formVersprechen) {
+      formVersprechen = (async () => {
+        try {
+          if (!customElements.get("ha-form") && window.loadCardHelpers) {
+            const helpers = await window.loadCardHelpers();
+            const c = await helpers.createCardElement({ type: "entities", entities: [] });
+            if (c && c.constructor && c.constructor.getConfigElement) await c.constructor.getConfigElement();
+          }
+        } catch (e) {
+          /* dann bleibt der Code-Editor */
+        }
+      })();
+    }
+    return formVersprechen.then(() => customElements.whenDefined("ha-form"));
+  };
+
+  const hexZuRgb = (s) => {
+    const m = /^#?([0-9a-f]{6}|[0-9a-f]{3})$/i.exec(String(s || "").trim());
+    if (!m) return undefined;
+    const h = m[1].length === 3 ? m[1].split("").map((c) => c + c).join("") : m[1];
+    return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+  };
+  const rgbZuHex = (rgb) =>
+    Array.isArray(rgb) && rgb.length === 3
+      ? "#" + rgb.map((n) => Math.max(0, Math.min(255, Math.round(Number(n) || 0))).toString(16).padStart(2, "0")).join("")
+      : undefined;
+
+  const ED_STYLE = `
+    :host { display: block; }
+    .ed { display: flex; flex-direction: column; gap: 8px; }
+    h3 { margin: 16px 0 0; font-size: 1em; font-weight: 500; color: var(--primary-color); }
+    .hinweis { font-size: .85em; color: var(--secondary-text-color); margin: -4px 2px 2px; line-height: 1.4; }
+    .liste { display: flex; flex-direction: column; gap: 8px; }
+    .eintrag { border: 1px solid var(--divider-color, rgba(127, 127, 127, .3)); border-radius: 10px; padding: 4px 8px 6px; }
+    .leiste { display: flex; align-items: center; gap: 2px; }
+    .leiste .nr { flex: 1; min-width: 0; font-size: .9em; color: var(--secondary-text-color); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .punkt { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+    .kn { border: 0; background: none; color: var(--secondary-text-color); padding: 4px; border-radius: 50%; cursor: pointer; display: inline-flex; }
+    .kn:hover { background: rgba(127, 127, 127, .15); }
+    .kn[disabled] { opacity: .35; cursor: default; background: none; }
+    .kn.rot { color: var(--error-color, #db4437); }
+    .kn ha-icon { --mdc-icon-size: 20px; }
+    .neu { display: block; border: 1px dashed var(--divider-color, rgba(127, 127, 127, .4)); border-radius: 10px; padding: 6px 8px 2px; }
+  `;
+
+  const knopf = (icon, titel, cls) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "kn" + (cls ? ` ${cls}` : "");
+    b.title = titel;
+    b.setAttribute("aria-label", titel);
+    b.innerHTML = `<ha-icon icon="${icon}"></ha-icon>`;
+    return b;
+  };
+
+  const ED_LABEL = {
+    title: "Überschrift",
+    total_entity: "Wert in der Mitte (optional)",
+    center_label: "Text unter dem Wert",
+    unit: "Einheit",
+    decimals: "Nachkommastellen",
+    datum_wahl: "Frühere Tage wählbar",
+    entity: "Entität",
+    name: "Name",
+    color: "Farbe",
+    neu: "Teil hinzufügen",
+  };
+  const ED_HILFE = {
+    total_entity: "Leer = Summe der Teile.",
+    center_label: "Leer = „gesamt“.",
+    unit: "Leer = Einheit der Entitäten.",
+    datum_wahl: "Pfeile und Kalender oben rechts; frühere Tage kommen aus der Langzeitstatistik.",
+    name: "Leer = Name der Entität.",
+    neu: "Entität auswählen – sie wird als neues Teil angehängt.",
+  };
+  const ED_SCHEMA = [
+    { name: "title", selector: { text: {} } },
+    { name: "total_entity", selector: { entity: {} } },
+    {
+      name: "",
+      type: "grid",
+      schema: [
+        { name: "center_label", selector: { text: {} } },
+        { name: "unit", selector: { text: {} } },
+      ],
+    },
+    {
+      name: "",
+      type: "grid",
+      schema: [
+        { name: "decimals", selector: { number: { min: 0, max: 4, step: 1, mode: "box" } } },
+        { name: "datum_wahl", selector: { boolean: {} } },
+      ],
+    },
+  ];
+  const TEIL_SCHEMA = [
+    { name: "entity", required: true, selector: { entity: {} } },
+    {
+      name: "",
+      type: "grid",
+      schema: [
+        { name: "name", selector: { text: {} } },
+        { name: "color", selector: { color_rgb: {} } },
+      ],
+    },
+  ];
+  const NEU_SCHEMA = [{ name: "neu", selector: { entity: {} } }];
+  const ORDNUNG = ["type", "title", "total_entity", "center_label", "unit", "decimals", "datum_wahl", "entities"];
+
+  class KreisdiagrammCardEditor extends HTMLElement {
+    constructor() {
+      super();
+      this.attachShadow({ mode: "open" });
+      this._cfg = {};
+      this._formen = [];
+      this._koepfe = [];
+    }
+
+    set hass(hass) {
+      this._hass = hass;
+      this.shadowRoot.querySelectorAll("ha-form").forEach((f) => {
+        f.hass = hass;
+      });
+    }
+
+    setConfig(config) {
+      this._cfg = { ...(config || {}) };
+      this._zeichnen();
+    }
+
+    connectedCallback() {
+      if (this._gestartet) return;
+      this._gestartet = true;
+      haFormLaden().then(() => {
+        this._bereit = true;
+        this._zeichnen();
+      });
+    }
+
+    _teile() {
+      return (Array.isArray(this._cfg.entities) ? this._cfg.entities : []).map((e) => (typeof e === "string" ? { entity: e } : { ...e }));
+    }
+
+    _form(schema, onChange) {
+      const f = document.createElement("ha-form");
+      f.computeLabel = (s) => ED_LABEL[s.name] || s.name;
+      f.computeHelper = (s) => ED_HILFE[s.name] || "";
+      f.hass = this._hass;
+      f.schema = schema;
+      f.addEventListener("value-changed", (ev) => {
+        ev.stopPropagation();
+        onChange({ ...((ev.detail && ev.detail.value) || {}) });
+      });
+      return f;
+    }
+
+    // Aufbau nur, wenn sich die Zahl der Teile ändert – sonst bekommen die Formulare nur neue Daten
+    // (so bleibt beim Tippen der Fokus im Feld)
+    _zeichnen() {
+      if (!this._bereit) return;
+      const teile = this._teile();
+      if (this._anzahl !== teile.length) {
+        this._anzahl = teile.length;
+        this._aufbauen(teile.length);
+      }
+      const c = this._cfg;
+      const kopf = {
+        title: c.title || "",
+        total_entity: c.total_entity || "",
+        center_label: c.center_label === undefined ? "" : String(c.center_label),
+        unit: c.unit === undefined ? "" : String(c.unit),
+        decimals: c.decimals === undefined || c.decimals === "" ? 1 : Number(c.decimals),
+        datum_wahl: c.datum_wahl !== false,
+      };
+      this._daten(this._kopf, kopf);
+      teile.forEach((t, i) => {
+        const farbe = t.color || PALETTE[i % PALETTE.length];
+        this._daten(this._formen[i], { entity: t.entity || "", name: t.name || "", color: hexZuRgb(farbe) });
+        const st = t.entity && this._hass ? this._hass.states[t.entity] : null;
+        const name = t.name || (st && st.attributes.friendly_name) || t.entity || "";
+        this._koepfe[i].innerHTML = `<span class="punkt" style="background:${esc(farbe)}"></span>Teil ${i + 1}${name ? ` · ${esc(name)}` : ""}`;
+      });
+    }
+
+    _daten(f, d) {
+      if (f && JSON.stringify(f.data) !== JSON.stringify(d)) f.data = d;
+    }
+
+    _aufbauen(n) {
+      const root = this.shadowRoot;
+      root.innerHTML = `<style>${ED_STYLE}</style><div class="ed"></div>`;
+      const ed = root.querySelector(".ed");
+      this._kopf = this._form(ED_SCHEMA, (v) => this._kopfGeaendert(v));
+      ed.appendChild(this._kopf);
+      const h = document.createElement("h3");
+      h.textContent = "Teile";
+      const hinweis = document.createElement("div");
+      hinweis.className = "hinweis";
+      hinweis.textContent = "Ohne eigene Farbe gilt die Farbe nach der Reihenfolge.";
+      const liste = document.createElement("div");
+      liste.className = "liste";
+      ed.append(h, hinweis, liste);
+      this._formen = [];
+      this._koepfe = [];
+      for (let i = 0; i < n; i += 1) {
+        const box = document.createElement("div");
+        box.className = "eintrag";
+        box.dataset.teil = String(i);
+        const leiste = document.createElement("div");
+        leiste.className = "leiste";
+        const nr = document.createElement("span");
+        nr.className = "nr";
+        const hoch = knopf("mdi:arrow-up", "nach oben");
+        const runter = knopf("mdi:arrow-down", "nach unten");
+        const weg = knopf("mdi:delete-outline", "Teil entfernen", "rot");
+        hoch.disabled = i === 0;
+        runter.disabled = i === n - 1;
+        hoch.addEventListener("click", () => this._verschieben(i, -1));
+        runter.addEventListener("click", () => this._verschieben(i, 1));
+        weg.addEventListener("click", () => this._entfernen(i));
+        leiste.append(nr, hoch, runter, weg);
+        const f = this._form(TEIL_SCHEMA, (v) => this._teilGeaendert(i, v));
+        box.append(leiste, f);
+        liste.appendChild(box);
+        this._formen.push(f);
+        this._koepfe.push(nr);
+      }
+      const neu = this._form(NEU_SCHEMA, (v) => {
+        if (!v.neu) return;
+        neu.data = { neu: "" };
+        this._senden({ ...this._cfg, entities: [...this._teile(), { entity: v.neu }] });
+      });
+      neu.className = "neu";
+      neu.data = { neu: "" };
+      ed.appendChild(neu);
+    }
+
+    _kopfGeaendert(v) {
+      const c = { ...this._cfg };
+      const setze = (k, wert, standard) => {
+        if (wert === undefined || wert === null || wert === "" || wert === standard) delete c[k];
+        else c[k] = wert;
+      };
+      setze("title", v.title);
+      setze("total_entity", v.total_entity);
+      setze("center_label", v.center_label);
+      setze("unit", v.unit);
+      const d = v.decimals === undefined || v.decimals === null || v.decimals === "" ? undefined : Number(v.decimals);
+      setze("decimals", Number.isInteger(d) ? d : undefined, 1);
+      if (v.datum_wahl === false) c.datum_wahl = false;
+      else delete c.datum_wahl;
+      this._senden(c);
+    }
+
+    _teilGeaendert(i, v) {
+      const teile = this._teile();
+      const alt = teile[i] || {};
+      const neu = { ...alt };
+      if (v.entity) neu.entity = v.entity; // leeren geht nicht – zum Entfernen den Papierkorb nehmen
+      if (v.name) neu.name = v.name;
+      else delete neu.name;
+      const hex = rgbZuHex(v.color);
+      if (hex) {
+        // Standardfarbe nicht festschreiben, solange sie niemand geändert hat
+        if (alt.color || hex !== PALETTE[i % PALETTE.length]) neu.color = hex;
+      } else if (!(alt.color && !hexZuRgb(alt.color))) {
+        delete neu.color; // eine eigene CSS-Farbe (z. B. var(--…)) bleibt, die zeigt der Farbwähler nicht
+      }
+      teile[i] = neu;
+      this._senden({ ...this._cfg, entities: teile });
+    }
+
+    _verschieben(i, d) {
+      const teile = this._teile();
+      const j = i + d;
+      if (j < 0 || j >= teile.length) return;
+      [teile[i], teile[j]] = [teile[j], teile[i]];
+      this._senden({ ...this._cfg, entities: teile });
+    }
+
+    _entfernen(i) {
+      const teile = this._teile();
+      teile.splice(i, 1);
+      this._senden({ ...this._cfg, entities: teile });
+    }
+
+    _senden(c) {
+      // feste Reihenfolge, damit der Code-Editor übersichtlich bleibt
+      const aus = {};
+      ORDNUNG.forEach((k) => {
+        if (c[k] !== undefined) aus[k] = c[k];
+      });
+      Object.keys(c).forEach((k) => {
+        if (!(k in aus)) aus[k] = c[k];
+      });
+      this._cfg = aus;
+      this._zeichnen();
+      this.dispatchEvent(new CustomEvent("config-changed", { detail: { config: aus }, bubbles: true, composed: true }));
+    }
+  }
+
+  if (!customElements.get(EDITOR_TAG)) customElements.define(EDITOR_TAG, KreisdiagrammCardEditor);
   customElements.define(TAG, KreisdiagrammCard);
   window.customCards = window.customCards || [];
   window.customCards.push({
